@@ -78,14 +78,21 @@ jobs:
         with:
           path: ./artifacts
 
+      - name: Rename Artifacts
+        run: |
+          mv ./artifacts/SimpleReverseTunnel-win-x64/SimpleReverseTunnel.exe ./artifacts/SimpleReverseTunnel-win-x64.exe
+          mv ./artifacts/SimpleReverseTunnel-win-x86/SimpleReverseTunnel.exe ./artifacts/SimpleReverseTunnel-win-x86.exe
+          mv ./artifacts/SimpleReverseTunnel-linux-x64/SimpleReverseTunnel ./artifacts/SimpleReverseTunnel-linux-x64
+          mv ./artifacts/SimpleReverseTunnel-linux-arm64/SimpleReverseTunnel ./artifacts/SimpleReverseTunnel-linux-arm64
+
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            ./artifacts/SimpleReverseTunnel-win-x64/SimpleReverseTunnel-win-x64.exe
-            ./artifacts/SimpleReverseTunnel-win-x86/SimpleReverseTunnel-win-x86.exe
-            ./artifacts/SimpleReverseTunnel-linux-x64/SimpleReverseTunnel-linux-x64
-            ./artifacts/SimpleReverseTunnel-linux-arm64/SimpleReverseTunnel-linux-arm64
+            ./artifacts/SimpleReverseTunnel-win-x64.exe
+            ./artifacts/SimpleReverseTunnel-win-x86.exe
+            ./artifacts/SimpleReverseTunnel-linux-x64
+            ./artifacts/SimpleReverseTunnel-linux-arm64
           draft: false
           prerelease: false
           generate_release_notes: true
