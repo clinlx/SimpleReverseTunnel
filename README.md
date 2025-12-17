@@ -2,7 +2,11 @@
 
 ## 编译
 
-确保安装了 .NET SDK 8.0 或更高版本。
+首先确保安装了 .NET SDK 8.0 或更高版本。
+
+微软官方文档：[安装 .NET SDK](https://learn.microsoft.com/zh-cn/dotnet/core/install/)
+
+执行编译命令
 
 ```bash
 dotnet build -c Release
