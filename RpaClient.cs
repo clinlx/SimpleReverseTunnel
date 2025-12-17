@@ -108,8 +108,8 @@ namespace SimpleReverseTunnel
                 }
                 else
                 {
-                    targetSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
-                    targetSocket.Connect(_targetIp, _targetPort);
+                    targetSocket = new Socket(SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+                    await targetSocket.ConnectAsync(_targetIp, _targetPort);
 
                     // 4. 开始转发 (UDP)
                     await NetworkHelper.ForwardUdpAsync(targetSocket, serverDataSocket);
