@@ -53,7 +53,7 @@ namespace SimpleReverseTunnel
         {
             Logger.Info("服务端启动...");
             Logger.Info($"模式: {_protocol}");
-            Logger.Info($"桥接端口: {_bridgePort} (TCP)");
+            Logger.Info($"桥接端口: {_bridgePort} (Tcp)");
             Logger.Info($"公共端口: {_publicPort} ({_protocol})");
             // Logger.Info($"Password: {_password}"); // 不要记录密码
 
