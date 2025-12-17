@@ -17,15 +17,17 @@ dotnet build -c Release
 - **Public Port**: 供外部用户访问 (协议类型根据参数指定)
 
 ```bash
-# 格式: SimpleReverseTunnel.exe server <bridge_port> <public_port> <password> [protocol]
+# 格式: SimpleReverseTunnel server <bridge_port> <public_port> <password> [protocol]
 # protocol 可选: tcp 或 udp
 
 # 示例 1: 启动 TCP 代理 (默认)
-# dotnet run -- server 9000 9001 MySecret
+dotnet run -- server 9000 9001 MySecret
+# 对于编译后的文件 ，改为执行：
 SimpleReverseTunnel.exe server 9000 9001 MySecret
 
 # 示例 2: 启动 UDP 代理
-# dotnet run -- server 9000 9001 MySecret udp
+dotnet run -- server 9000 9001 MySecret udp
+# 对于编译后的文件 ，改为执行：
 SimpleReverseTunnel.exe server 9000 9001 MySecret udp
 ```
 
@@ -34,15 +36,17 @@ SimpleReverseTunnel.exe server 9000 9001 MySecret udp
 启动客户端，连接服务端并将流量转发到本地目标服务。
 
 ```bash
-# 格式: SimpleReverseTunnel.exe client <server_ip> <bridge_port> <target_ip> <target_port> <password> [protocol]
+# 格式: SimpleReverseTunnel client <server_ip> <bridge_port> <target_ip> <target_port> <password> [protocol]
 # protocol 可选: tcp 或 udp，必须与服务端保持一致
 
 # 示例 1: 转发本地 TCP 服务 (默认)
-# dotnet run -- client 1.2.3.4 9000 127.0.0.1 80 MySecret
+dotnet run -- client 1.2.3.4 9000 127.0.0.1 80 MySecret
+# 对于编译后的文件 ，改为执行：
 SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 80 MySecret
 
 # 示例 2: 转发本地 UDP 服务
-# dotnet run -- client 1.2.3.4 9000 127.0.0.1 53 MySecret udp
+dotnet run -- client 1.2.3.4 9000 127.0.0.1 53 MySecret udp
+# 对于编译后的文件 ，改为执行：
 SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 53 MySecret udp
 ```
 
