@@ -64,3 +64,6 @@ server.log
 
 # Trae IDE
 .trae/
+**/.idea
+**/.vs/
+.docker.md
