@@ -67,3 +67,4 @@ server.log
 **/.idea
 **/.vs/
 .docker.md
+Properties/PublishProfiles/FolderProfile.pubxml
