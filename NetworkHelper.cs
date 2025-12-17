@@ -19,8 +19,7 @@ namespace SimpleReverseTunnel
 
         public static async Task SendHandshakeAsync(SecureSocket socket, ConnectionType type, Guid? connectionId = null)
         {
-            // 协议结构: [Magic(4)] [Type(1)] [Payload(16, optional)]
-            // 密码验证隐式包含在 SecureSocket 的 XOR 混淆中
+            // 协议: [Magic(4)] [Type(1)] [Payload(16, optional)]
             
             int len = 4 + 1 + (type == ConnectionType.Data ? 16 : 0);
             var buffer = ArrayPool<byte>.Shared.Rent(len);
@@ -131,7 +130,6 @@ namespace SimpleReverseTunnel
 
         private static async Task TransferAsync(Socket source, SecureSocket destination)
         {
-            // 使用大缓冲区减少系统调用
             byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
             try
             {
@@ -139,13 +137,12 @@ namespace SimpleReverseTunnel
                 {
                     int read = await source.ReceiveAsync(buffer, SocketFlags.None);
                     if (read == 0) break;
-                    // SecureSocket.SendAsync 内部会处理缓冲区拷贝以避免 XOR 污染源数据
                     await destination.SendAsync(buffer.AsMemory(0, read));
                 }
             }
             catch 
             {
-                // Connection lost or reset
+                // Connection lost
             }
             finally
             {
@@ -161,7 +158,6 @@ namespace SimpleReverseTunnel
             {
                 while (true)
                 {
-                    // ReceiveAsync 会在原地进行 XOR 解密
                     int read = await source.ReceiveAsync(buffer);
                     if (read == 0) break;
                     await destination.SendAsync(buffer.AsMemory(0, read), SocketFlags.None);
@@ -169,7 +165,7 @@ namespace SimpleReverseTunnel
             }
             catch 
             {
-                // Connection lost or reset
+                // Connection lost
             }
             finally
             {
@@ -183,6 +179,86 @@ namespace SimpleReverseTunnel
             try { socket.Shutdown(SocketShutdown.Both); } catch {}
             try { socket.Close(); } catch {}
             try { socket.Dispose(); } catch {}
+        }
+
+        public static async Task ForwardUdpAsync(Socket udpSide, SecureSocket secureSide)
+        {
+            try
+            {
+                var t1 = TransferUdpToTcpAsync(udpSide, secureSide);
+                var t2 = TransferTcpToUdpAsync(secureSide, udpSide);
+                await Task.WhenAll(t1, t2);
+            }
+            catch { /* Ignore */ }
+            finally
+            {
+                CleanupSocket(udpSide);
+                secureSide.Dispose();
+            }
+        }
+
+        private static async Task TransferUdpToTcpAsync(Socket udpSource, SecureSocket tcpDest)
+        {
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(65535);
+            byte[] lenBuf = new byte[2]; // Reuse allocation
+            try
+            {
+                while (true)
+                {
+                    // UDP receive
+                    int read = await udpSource.ReceiveAsync(buffer, SocketFlags.None);
+                    if (read == 0) break; 
+
+                    // Write Length (Big Endian)
+                    lenBuf[0] = (byte)(read >> 8);
+                    lenBuf[1] = (byte)(read);
+                    
+                    await tcpDest.SendAsync(lenBuf);
+                    await tcpDest.SendAsync(buffer.AsMemory(0, read));
+                }
+            }
+            catch
+            {
+                // Error
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        private static async Task TransferTcpToUdpAsync(SecureSocket tcpSource, Socket udpDest)
+        {
+            byte[] lenBuf = new byte[2]; // Reuse allocation
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(65535);
+            try
+            {
+                while (true)
+                {
+                    // Read Length
+                    if (!await ReadExactAsync(tcpSource, lenBuf)) break;
+                    
+                    int length = (lenBuf[0] << 8) | lenBuf[1];
+                    if (length > buffer.Length) 
+                    {
+                        break; 
+                    }
+
+                    // Read Payload
+                    if (!await ReadExactAsync(tcpSource, buffer.AsMemory(0, length))) break;
+
+                    // Send UDP
+                    await udpDest.SendAsync(buffer.AsMemory(0, length), SocketFlags.None);
+                }
+            }
+            catch
+            {
+                // Error
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 }

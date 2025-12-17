@@ -11,21 +11,22 @@ namespace SimpleReverseTunnel
         private readonly string _targetIp;
         private readonly int _targetPort;
         private readonly string _password;
+        private readonly System.Net.Sockets.ProtocolType _protocol;
 
-        public RpaClient(string serverIp, int serverPort, string targetIp, int targetPort, string password)
+        public RpaClient(string serverIp, int serverPort, string targetIp, int targetPort, string password, System.Net.Sockets.ProtocolType protocol = System.Net.Sockets.ProtocolType.Tcp)
         {
             _serverIp = serverIp;
             _serverPort = serverPort;
             _targetIp = targetIp;
             _targetPort = targetPort;
             _password = password;
+            _protocol = protocol;
         }
 
         public async Task RunAsync()
         {
-            Logger.Info($"目标: {_targetIp}:{_targetPort}");
+            Logger.Info($"目标: {_targetIp}:{_targetPort} ({_protocol})");
             Logger.Info($"服务器: {_serverIp}:{_serverPort}");
-            // Logger.Info($"Password: {_password}"); // 不要记录密码
 
             while (true)
             {
@@ -67,7 +68,7 @@ namespace SimpleReverseTunnel
                 byte cmd = buffer[0];
                 if (cmd == 0x00) // Heartbeat
                 {
-                    // Logger.Info("收到心跳包");
+                    // Ignore
                 }
                 else if (cmd == 0x01) // RequestConnect
                 {
@@ -97,16 +98,25 @@ namespace SimpleReverseTunnel
                 await NetworkHelper.SendHandshakeAsync(serverDataSocket, NetworkHelper.ConnectionType.Data, connId);
 
                 // 3. 连接到目标服务
-                targetSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                await targetSocket.ConnectAsync(_targetIp, _targetPort);
+                if (_protocol == System.Net.Sockets.ProtocolType.Tcp)
+                {
+                    targetSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                    await targetSocket.ConnectAsync(_targetIp, _targetPort);
 
-                // 4. 开始转发
-                // 注意: ForwardAsync(明文端, 密文端)
-                await NetworkHelper.ForwardAsync(targetSocket, serverDataSocket);
+                    // 4. 开始转发
+                    await NetworkHelper.ForwardAsync(targetSocket, serverDataSocket);
+                }
+                else
+                {
+                    targetSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+                    targetSocket.Connect(_targetIp, _targetPort);
+
+                    // 4. 开始转发 (UDP)
+                    await NetworkHelper.ForwardUdpAsync(targetSocket, serverDataSocket);
+                }
             }
             catch (Exception)
             {
-                // Logger.Warn($"Proxy Failed {connId}");
                 if (serverDataSocket != null) serverDataSocket.Dispose();
                 if (targetSocket != null) NetworkHelper.CleanupSocket(targetSocket);
             }

@@ -19,7 +19,7 @@ namespace SimpleReverseTunnel
         public SecureSocket(Socket socket, string password)
         {
             InnerSocket = socket;
-            // 通过密码生成 SHA256 密钥，确保存储分布均匀
+            // SHA256 确保密钥分布均匀
             using var sha256 = SHA256.Create();
             _key = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
         }
@@ -39,7 +39,7 @@ namespace SimpleReverseTunnel
 
         public async Task SendAsync(ReadOnlyMemory<byte> buffer)
         {
-            // 租用缓冲区以避免修改原始数据（XOR 是原地操作）
+            // 租用缓冲区避免修改原始数据 (XOR 是原地的)
             byte[] temp = System.Buffers.ArrayPool<byte>.Shared.Rent(buffer.Length);
             try
             {
@@ -56,16 +56,11 @@ namespace SimpleReverseTunnel
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ApplyXor(Span<byte> data, ref int keyIndex)
         {
-            // 简单的字节 XOR 非常快，通常会被 JIT 自动向量化。
-            // 显式 SIMD (Vector<byte>) 在这种滚动密钥窗口场景下实现较复杂。
-            // 保持简单的流式加密行为。
-            
-            // 手动展开小循环
             int i = 0;
             int len = data.Length;
             int kLen = _key.Length;
 
-            // 避免在循环中使用 % 运算符
+            // 避免循环中取模
             int kIdx = keyIndex % kLen;
             
             for (; i < len; i++)
@@ -75,8 +70,7 @@ namespace SimpleReverseTunnel
                 if (kIdx == kLen) kIdx = 0;
             }
             
-            // 更新持久化索引
-            keyIndex = (keyIndex + len) % int.MaxValue; // 安全回绕
+            keyIndex = (keyIndex + len) % int.MaxValue;
         }
 
         public void Shutdown(SocketShutdown how) => InnerSocket.Shutdown(how);

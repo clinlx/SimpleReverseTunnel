@@ -19,18 +19,24 @@ namespace SimpleReverseTunnel
             {
                 if (mode == "server")
                 {
-                    // server <bridge_port> <public_port> <password>
+                    // server <bridge_port> <public_port> <password> [protocol]
                     if (args.Length < 4) throw new ArgumentException("Missing arguments for server mode.");
                     int bridgePort = int.Parse(args[1]);
                     int publicPort = int.Parse(args[2]);
                     string password = args[3];
                     
-                    var server = new RpaServer(bridgePort, publicPort, password);
+                    System.Net.Sockets.ProtocolType protocol = System.Net.Sockets.ProtocolType.Tcp;
+                    if (args.Length > 4 && args[4].ToLower() == "udp")
+                    {
+                        protocol = System.Net.Sockets.ProtocolType.Udp;
+                    }
+
+                    var server = new RpaServer(bridgePort, publicPort, password, protocol);
                     await server.RunAsync();
                 }
                 else if (mode == "client")
                 {
-                    // client <server_ip> <server_port> <target_ip> <target_port> <password>
+                    // client <server_ip> <server_port> <target_ip> <target_port> <password> [protocol]
                     if (args.Length < 6) throw new ArgumentException("Missing arguments for client mode.");
                     string serverIp = args[1];
                     int serverPort = int.Parse(args[2]);
@@ -38,7 +44,13 @@ namespace SimpleReverseTunnel
                     int targetPort = int.Parse(args[4]);
                     string password = args[5];
 
-                    var client = new RpaClient(serverIp, serverPort, targetIp, targetPort, password);
+                    System.Net.Sockets.ProtocolType protocol = System.Net.Sockets.ProtocolType.Tcp;
+                    if (args.Length > 6 && args[6].ToLower() == "udp")
+                    {
+                        protocol = System.Net.Sockets.ProtocolType.Udp;
+                    }
+
+                    var client = new RpaClient(serverIp, serverPort, targetIp, targetPort, password, protocol);
                     await client.RunAsync();
                 }
                 else
@@ -55,13 +67,13 @@ namespace SimpleReverseTunnel
 
         static void ShowUsage()
         {
-            Console.WriteLine("SimpleReverseTunnel - Secure & Fast TCP Tunnel");
+            Console.WriteLine("SimpleReverseTunnel - Secure & Fast Tunnel (TCP/UDP)");
             Console.WriteLine("Usage:");
-            Console.WriteLine("  Server: SimpleReverseTunnel.exe server <bridge_port> <public_port> <password>");
-            Console.WriteLine("  Client: SimpleReverseTunnel.exe client <server_ip> <bridge_port> <target_ip> <target_port> <password>");
+            Console.WriteLine("  Server: SimpleReverseTunnel.exe server <bridge_port> <public_port> <password> [tcp|udp]");
+            Console.WriteLine("  Client: SimpleReverseTunnel.exe client <server_ip> <bridge_port> <target_ip> <target_port> <password> [tcp|udp]");
             Console.WriteLine("Example:");
-            Console.WriteLine("  Server: SimpleReverseTunnel.exe server 9000 9001 MySecretPass");
-            Console.WriteLine("  Client: SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 80 MySecretPass");
+            Console.WriteLine("  Server: SimpleReverseTunnel.exe server 9000 9001 MySecretPass udp");
+            Console.WriteLine("  Client: SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 53 MySecretPass udp");
         }
     }
 }
