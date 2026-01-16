@@ -27,9 +27,9 @@ namespace SimpleReverseTunnel
         public bool Connected => InnerSocket.Connected;
         public EndPoint? RemoteEndPoint => InnerSocket.RemoteEndPoint;
 
-        public async Task<int> ReceiveAsync(Memory<byte> buffer)
+        public async Task<int> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
-            int read = await InnerSocket.ReceiveAsync(buffer, SocketFlags.None);
+            int read = await InnerSocket.ReceiveAsync(buffer, SocketFlags.None, cancellationToken);
             if (read > 0)
             {
                 ApplyXor(buffer.Span.Slice(0, read), ref _recvIndex);

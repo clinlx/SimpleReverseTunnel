@@ -101,8 +101,7 @@ namespace SimpleReverseTunnel
             try
             {
                 using var cts = new CancellationTokenSource(5000);
-
-                var (success, type, connId) = await NetworkHelper.ReceiveHandshakeAsync(socket);
+                var (success, type, connId) = await NetworkHelper.ReceiveHandshakeAsync(socket, cts.Token);
                 
                 if (!success)
                 {
@@ -115,6 +114,16 @@ namespace SimpleReverseTunnel
 
                 if (type == NetworkHelper.ConnectionType.Control)
                 {
+                    lock (_controlLock)
+                    {
+                        if (_controlSocket != null && _controlSocket.Connected)
+                        {
+                            Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {_controlSocket.RemoteEndPoint}");
+                            socket.Dispose();
+                            return;
+                        }
+                    }
+
                     RegisterControlSocket(socket);
                     _ = SendHeartbeatsAsync(socket);
                     await MonitorControlConnectionAsync(socket);

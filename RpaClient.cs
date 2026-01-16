@@ -1,5 +1,6 @@
 using System;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SimpleReverseTunnel
@@ -60,9 +61,18 @@ namespace SimpleReverseTunnel
             byte[] buffer = new byte[17]; // 1 命令 + 16 ID
             while (true)
             {
-                if (!await NetworkHelper.ReadExactAsync(controlSocket, buffer))
+                // 心跳间隔5秒，设置15秒超时以检测断连
+                using var cts = new CancellationTokenSource(15000);
+                try
                 {
-                    throw new Exception("服务器关闭了连接");
+                    if (!await NetworkHelper.ReadExactAsync(controlSocket, buffer, cts.Token))
+                    {
+                        throw new Exception("服务器关闭了连接");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new Exception("连接超时 (心跳丢失)");
                 }
 
                 byte cmd = buffer[0];

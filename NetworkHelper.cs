@@ -53,11 +53,11 @@ namespace SimpleReverseTunnel
         }
 
         // Returns: (IsSuccess, ConnectionType, ConnectionId)
-        public static async Task<(bool, ConnectionType, Guid)> ReceiveHandshakeAsync(SecureSocket socket)
+        public static async Task<(bool, ConnectionType, Guid)> ReceiveHandshakeAsync(SecureSocket socket, CancellationToken token = default)
         {
             // Read Magic (4)
             byte[] header = new byte[4];
-            if (!await ReadExactAsync(socket, header))
+            if (!await ReadExactAsync(socket, header, token))
             {
                 Logger.Warn($"读取协议头失败: {socket.RemoteEndPoint}");
                 return (false, default, default);
@@ -71,7 +71,7 @@ namespace SimpleReverseTunnel
 
             // Read Type
             byte[] typeBuf = new byte[1];
-            if (!await ReadExactAsync(socket, typeBuf))
+            if (!await ReadExactAsync(socket, typeBuf, token))
             {
                 Logger.Warn($"读取类型失败: {socket.RemoteEndPoint}");
                 return (false, default, default);
@@ -82,7 +82,7 @@ namespace SimpleReverseTunnel
             if (type == ConnectionType.Data)
             {
                 byte[] idBuf = new byte[16];
-                if (!await ReadExactAsync(socket, idBuf))
+                if (!await ReadExactAsync(socket, idBuf, token))
                 {
                     Logger.Warn($"读取连接ID失败: {socket.RemoteEndPoint}");
                     return (false, default, default);
@@ -93,12 +93,12 @@ namespace SimpleReverseTunnel
             return (true, type, connId);
         }
 
-        public static async Task<bool> ReadExactAsync(SecureSocket socket, Memory<byte> buffer)
+        public static async Task<bool> ReadExactAsync(SecureSocket socket, Memory<byte> buffer, CancellationToken token = default)
         {
             int totalRead = 0;
             while (totalRead < buffer.Length)
             {
-                int read = await socket.ReceiveAsync(buffer.Slice(totalRead));
+                int read = await socket.ReceiveAsync(buffer.Slice(totalRead), token);
                 if (read == 0) return false;
                 totalRead += read;
             }
