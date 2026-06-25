@@ -143,7 +143,7 @@ namespace SimpleReverseTunnel
                 }
 
                 var secureSocket = new SecureSocket(rawSocket, match.Context.Key, match.ConsumedBytes);
-                Logger.Info($"握手成功: {match.Type} {match.ConnectionId}");
+                Logger.Info(FormatHandshakeSuccessMessage(match.Type, match.ConnectionId, match.Context.Mapping, rawSocket.RemoteEndPoint));
 
                 if (match.Type == NetworkHelper.ConnectionType.Control)
                 {
@@ -562,6 +562,17 @@ namespace SimpleReverseTunnel
         }
 
         private sealed record HandshakeMatch(TunnelContext Context, NetworkHelper.ConnectionType Type, Guid ConnectionId, int ConsumedBytes);
+
+        private static string FormatHandshakeSuccessMessage(NetworkHelper.ConnectionType type, Guid connectionId, TunnelMapping mapping, object? remoteEndPoint)
+        {
+            string baseMessage = $"握手成功: {type} 端口={mapping.PublicPort} 协议={mapping.Protocol} Secret={mapping.Password}";
+            if (type == NetworkHelper.ConnectionType.Data)
+            {
+                baseMessage += $" 连接ID={connectionId}";
+            }
+
+            return $"{baseMessage} 连接={remoteEndPoint}";
+        }
 
         private HandshakeMatch? TryMatchHandshake(byte[] encryptedHandshake, NetworkHelper.ConnectionType? expectedType)
         {
