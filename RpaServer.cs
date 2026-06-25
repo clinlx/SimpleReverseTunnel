@@ -116,7 +116,12 @@ namespace SimpleReverseTunnel
                 {
                     lock (_controlLock)
                     {
-                        if (_controlSocket != null && _controlSocket.Connected)
+                        if (!IsControlSocketUsable(_controlSocket))
+                        {
+                            ClearControlSocketUnderLock(_controlSocket);
+                        }
+
+                        if (_controlSocket != null)
                         {
                             Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {_controlSocket.RemoteEndPoint}");
                             socket.Dispose();
@@ -165,6 +170,10 @@ namespace SimpleReverseTunnel
             {
                 // 心跳失败，可能已断开连接
             }
+            finally
+            {
+                CleanupControlSocket(socket);
+            }
         }
 
         private async Task MonitorControlConnectionAsync(SecureSocket socket)
@@ -202,10 +211,56 @@ namespace SimpleReverseTunnel
             {
                 if (_controlSocket == socket)
                 {
-                    _controlSocket = null;
-                    Logger.Info("控制连接已清理");
+                    ClearControlSocketUnderLock(socket);
                 }
             }
+            socket.Dispose();
+        }
+
+        private SecureSocket? GetActiveControlSocket()
+        {
+            lock (_controlLock)
+            {
+                if (!IsControlSocketUsable(_controlSocket))
+                {
+                    ClearControlSocketUnderLock(_controlSocket);
+                }
+
+                return _controlSocket;
+            }
+        }
+
+        private static bool IsControlSocketUsable(SecureSocket? socket)
+        {
+            if (socket == null || !socket.Connected)
+            {
+                return false;
+            }
+
+            try
+            {
+                Socket innerSocket = socket.InnerSocket;
+                return !(innerSocket.Poll(0, SelectMode.SelectRead) && innerSocket.Available == 0);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ClearControlSocketUnderLock(SecureSocket? socket)
+        {
+            if (socket == null)
+            {
+                return;
+            }
+
+            if (_controlSocket == socket)
+            {
+                _controlSocket = null;
+                Logger.Info("控制连接已清理");
+            }
+
             socket.Dispose();
         }
 
@@ -244,14 +299,7 @@ namespace SimpleReverseTunnel
 
         private async Task HandleUserConnectionAsync(Socket userSocket)
         {
-            SecureSocket? control = null;
-            lock (_controlLock)
-            {
-                if (_controlSocket != null && _controlSocket.Connected)
-                {
-                    control = _controlSocket;
-                }
-            }
+            SecureSocket? control = GetActiveControlSocket();
 
             if (control == null)
             {
@@ -438,14 +486,7 @@ namespace SimpleReverseTunnel
 
         private async Task InitializeUdpSessionAsync(UdpSession session, EndPoint remoteEP)
         {
-            SecureSocket? control = null;
-            lock (_controlLock)
-            {
-                if (_controlSocket != null && _controlSocket.Connected)
-                {
-                    control = _controlSocket;
-                }
-            }
+            SecureSocket? control = GetActiveControlSocket();
 
             if (control == null)
             {
