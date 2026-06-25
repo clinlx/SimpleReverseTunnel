@@ -68,3 +68,5 @@ server.log
 **/.vs/
 .docker.md
 Properties/PublishProfiles/FolderProfile.pubxml
+Tests/
+TestHarness/

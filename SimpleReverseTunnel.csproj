@@ -9,4 +9,8 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="TestHarness\**\*.cs" />
+  </ItemGroup>
+
 </Project>
