@@ -20,7 +20,7 @@ namespace SimpleReverseTunnel
             {
                 Mapping = mapping;
                 Key = SecureSocket.DeriveKey(mapping.Password);
-                if (mapping.Protocol == ProtocolType.Tcp)
+                if (mapping.Protocol is TunnelProtocol.Tcp or TunnelProtocol.All)
                 {
                     PublicListener = new TcpListener(IPAddress.Any, mapping.PublicPort);
                 }
@@ -29,8 +29,10 @@ namespace SimpleReverseTunnel
             public TunnelMapping Mapping { get; }
             public byte[] Key { get; }
             public TcpListener? PublicListener { get; }
-            public Socket? PublicUdpSocket { get; set; }
-            public SecureSocket? ControlSocket { get; set; }
+            public Socket? PublicUdpSocket;
+            public SecureSocket? TcpControlSocket;
+            public SecureSocket? UdpControlSocket;
+            public SecureSocket? LegacyControlSocket;
             public object ControlLock { get; } = new();
             public SemaphoreSlim ControlSendLock { get; } = new(1, 1);
             public ConcurrentDictionary<Guid, TaskCompletionSource<SecureSocket>> PendingConnections { get; } = new();
@@ -44,7 +46,7 @@ namespace SimpleReverseTunnel
             public TaskCompletionSource<SecureSocket> ConnectTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
-        public RpaServer(int bridgePort, int publicPort, string password, ProtocolType protocol = ProtocolType.Tcp)
+        public RpaServer(int bridgePort, int publicPort, string password, TunnelProtocol protocol = TunnelProtocol.Tcp)
             : this(bridgePort, new[] { new TunnelMapping(publicPort, password, protocol) })
         {
         }
@@ -75,12 +77,13 @@ namespace SimpleReverseTunnel
             var tasks = new List<Task> { AcceptBridgeConnectionsAsync() };
             foreach (TunnelContext context in _contexts)
             {
-                if (context.Mapping.Protocol == ProtocolType.Tcp)
+                if (context.Mapping.Protocol is TunnelProtocol.Tcp or TunnelProtocol.All)
                 {
                     context.PublicListener!.Start();
                     tasks.Add(AcceptPublicConnectionsAsync(context));
                 }
-                else
+
+                if (context.Mapping.Protocol is TunnelProtocol.Udp or TunnelProtocol.All)
                 {
                     tasks.Add(AcceptPublicUdpAsync(context));
                 }
@@ -147,7 +150,8 @@ namespace SimpleReverseTunnel
 
                 if (match.Type == NetworkHelper.ConnectionType.Control)
                 {
-                    if (RegisterControlConnection(match.Context, secureSocket))
+                    ProtocolType? clientProtocol = await ReadClientProtocolAsync(match.Context, secureSocket);
+                    if (RegisterControlConnection(match.Context, secureSocket, clientProtocol))
                     {
                         _ = SendHeartbeatsAsync(match.Context, secureSocket);
                         await MonitorControlConnectionAsync(match.Context, secureSocket);
@@ -170,23 +174,62 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private bool RegisterControlConnection(TunnelContext context, SecureSocket socket)
+        private async Task<ProtocolType?> ReadClientProtocolAsync(TunnelContext context, SecureSocket socket)
+        {
+            byte[] buffer = new byte[1];
+            using var cts = new CancellationTokenSource(250);
+            try
+            {
+                int read = await socket.ReceiveAsync(buffer, cts.Token);
+                if (read == 1)
+                {
+                    ProtocolType? protocol = buffer[0] switch
+                    {
+                        0x02 => ProtocolType.Tcp,
+                        0x03 => ProtocolType.Udp,
+                        _ => null
+                    };
+
+                    if (protocol.HasValue)
+                    {
+                        return protocol;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch
+            {
+            }
+
+            if (context.Mapping.Protocol != TunnelProtocol.All)
+            {
+                return context.Mapping.Protocol == TunnelProtocol.Udp ? ProtocolType.Udp : ProtocolType.Tcp;
+            }
+
+            return null;
+        }
+
+        private bool RegisterControlConnection(TunnelContext context, SecureSocket socket, ProtocolType? clientProtocol)
         {
             lock (context.ControlLock)
             {
-                if (!IsControlSocketUsable(context.ControlSocket))
+                ref SecureSocket? controlSocket = ref GetControlSocketSlot(context, clientProtocol);
+
+                if (!IsControlSocketUsable(controlSocket))
                 {
-                    ClearControlSocketUnderLock(context, context.ControlSocket);
+                    ClearControlSocketUnderLock(context, controlSocket);
                 }
 
-                if (context.ControlSocket != null)
+                if (controlSocket != null)
                 {
-                    Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {context.ControlSocket.RemoteEndPoint}");
+                    Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {controlSocket.RemoteEndPoint}");
                     socket.Dispose();
                     return false;
                 }
 
-                context.ControlSocket = socket;
+                controlSocket = socket;
                 Logger.Info($"控制连接已注册: {socket.RemoteEndPoint}");
                 return true;
             }
@@ -245,7 +288,7 @@ namespace SimpleReverseTunnel
         {
             lock (context.ControlLock)
             {
-                if (context.ControlSocket == socket)
+                if (context.TcpControlSocket == socket || context.UdpControlSocket == socket || context.LegacyControlSocket == socket)
                 {
                     ClearControlSocketUnderLock(context, socket);
                 }
@@ -253,17 +296,43 @@ namespace SimpleReverseTunnel
             socket.Dispose();
         }
 
-        private SecureSocket? GetActiveControlSocket(TunnelContext context)
+        private SecureSocket? GetActiveControlSocket(TunnelContext context, ProtocolType requestedProtocol)
         {
             lock (context.ControlLock)
             {
-                if (!IsControlSocketUsable(context.ControlSocket))
+                ref SecureSocket? controlSocket = ref GetControlSocketSlot(context, requestedProtocol);
+                if (!IsControlSocketUsable(controlSocket))
                 {
-                    ClearControlSocketUnderLock(context, context.ControlSocket);
+                    ClearControlSocketUnderLock(context, controlSocket);
                 }
 
-                return context.ControlSocket;
+                if (controlSocket != null)
+                {
+                    return controlSocket;
+                }
+
+                if (!IsControlSocketUsable(context.LegacyControlSocket))
+                {
+                    ClearControlSocketUnderLock(context, context.LegacyControlSocket);
+                }
+
+                return context.LegacyControlSocket;
             }
+        }
+
+        private static ref SecureSocket? GetControlSocketSlot(TunnelContext context, ProtocolType? protocol)
+        {
+            if (protocol == ProtocolType.Tcp)
+            {
+                return ref context.TcpControlSocket;
+            }
+
+            if (protocol == ProtocolType.Udp)
+            {
+                return ref context.UdpControlSocket;
+            }
+
+            return ref context.LegacyControlSocket;
         }
 
         private static bool IsControlSocketUsable(SecureSocket? socket)
@@ -291,9 +360,19 @@ namespace SimpleReverseTunnel
                 return;
             }
 
-            if (context.ControlSocket == socket)
+            if (context.TcpControlSocket == socket)
             {
-                context.ControlSocket = null;
+                context.TcpControlSocket = null;
+                Logger.Info("控制连接已清理");
+            }
+            else if (context.UdpControlSocket == socket)
+            {
+                context.UdpControlSocket = null;
+                Logger.Info("控制连接已清理");
+            }
+            else if (context.LegacyControlSocket == socket)
+            {
+                context.LegacyControlSocket = null;
                 Logger.Info("控制连接已清理");
             }
 
@@ -320,7 +399,7 @@ namespace SimpleReverseTunnel
 
         private async Task HandleUserConnectionAsync(TunnelContext context, Socket userSocket)
         {
-            SecureSocket? control = GetActiveControlSocket(context);
+            SecureSocket? control = GetActiveControlSocket(context, ProtocolType.Tcp);
             if (control == null)
             {
                 NetworkHelper.CleanupSocket(userSocket);
@@ -490,7 +569,7 @@ namespace SimpleReverseTunnel
 
         private async Task InitializeUdpSessionAsync(TunnelContext context, UdpSession session, EndPoint remoteEP)
         {
-            SecureSocket? control = GetActiveControlSocket(context);
+            SecureSocket? control = GetActiveControlSocket(context, ProtocolType.Udp);
             if (control == null)
             {
                 session.ConnectTcs.TrySetException(new Exception("No control connection"));

@@ -12,9 +12,9 @@ namespace SimpleReverseTunnel
         private readonly string _targetIp;
         private readonly int _targetPort;
         private readonly string _password;
-        private readonly System.Net.Sockets.ProtocolType _protocol;
+        private readonly TunnelProtocol _protocol;
 
-        public RpaClient(string serverIp, int serverPort, string targetIp, int targetPort, string password, System.Net.Sockets.ProtocolType protocol = System.Net.Sockets.ProtocolType.Tcp)
+        public RpaClient(string serverIp, int serverPort, string targetIp, int targetPort, string password, TunnelProtocol protocol = TunnelProtocol.Tcp)
         {
             _serverIp = serverIp;
             _serverPort = serverPort;
@@ -29,15 +29,26 @@ namespace SimpleReverseTunnel
             Logger.Info($"目标: {_targetIp}:{_targetPort} ({_protocol})");
             Logger.Info($"服务器: {_serverIp}:{_serverPort}");
 
+            if (_protocol == TunnelProtocol.All)
+            {
+                await Task.WhenAll(RunProtocolAsync(TunnelProtocol.Tcp), RunProtocolAsync(TunnelProtocol.Udp));
+                return;
+            }
+
+            await RunProtocolAsync(_protocol);
+        }
+
+        private async Task RunProtocolAsync(TunnelProtocol protocol)
+        {
             while (true)
             {
                 try
                 {
-                    await MaintainControlConnectionAsync();
+                    await MaintainControlConnectionAsync(protocol);
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error($"控制连接异常: {ex.Message}");
+                    Logger.Error($"控制连接异常 ({protocol}): {ex.Message}");
                 }
                 
                 Logger.Info("3秒后重连...");
@@ -45,7 +56,7 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private async Task MaintainControlConnectionAsync()
+        private async Task MaintainControlConnectionAsync(TunnelProtocol protocol)
         {
             Logger.Info("正在连接服务器...");
             using Socket rawSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
@@ -56,6 +67,7 @@ namespace SimpleReverseTunnel
 
             // 握手
             await NetworkHelper.SendHandshakeAsync(controlSocket, NetworkHelper.ConnectionType.Control);
+            await controlSocket.SendAsync(new[] { GetProtocolMarker(protocol) });
 
             // 读取指令循环
             byte[] buffer = new byte[17]; // 1 命令 + 16 ID
@@ -83,7 +95,7 @@ namespace SimpleReverseTunnel
                 else if (cmd == 0x01) // RequestConnect
                 {
                     Guid connId = new Guid(buffer.AsSpan(1, 16));
-                    _ = HandleProxyRequestAsync(connId);
+                    _ = HandleProxyRequestAsync(connId, protocol);
                 }
                 else
                 {
@@ -92,7 +104,12 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private async Task HandleProxyRequestAsync(Guid connId)
+        private static byte GetProtocolMarker(TunnelProtocol protocol)
+        {
+            return protocol == TunnelProtocol.Udp ? (byte)0x03 : (byte)0x02;
+        }
+
+        private async Task HandleProxyRequestAsync(Guid connId, TunnelProtocol protocol)
         {
             SecureSocket? serverDataSocket = null;
             Socket? targetSocket = null;
@@ -108,7 +125,7 @@ namespace SimpleReverseTunnel
                 await NetworkHelper.SendHandshakeAsync(serverDataSocket, NetworkHelper.ConnectionType.Data, connId);
 
                 // 3. 连接到目标服务
-                if (_protocol == System.Net.Sockets.ProtocolType.Tcp)
+                if (protocol == TunnelProtocol.Tcp)
                 {
                     targetSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
                     await targetSocket.ConnectAsync(_targetIp, _targetPort);

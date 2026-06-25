@@ -29,7 +29,7 @@ ENV MODE=server
 
 # Server configuration
 ENV BRIDGE_PORT=2560
-ENV REVERSE_TUNNEL_MAP=8080:MySecret:tcp
+ENV REVERSE_TUNNEL_MAP=8080:MySecret:all
 
 # Client configuration
 ENV SERVER_IP=127.0.0.1

@@ -52,14 +52,14 @@ namespace SimpleReverseTunnel
                 return;
             }
 
-            if (args.Length < 4) throw new ArgumentException("服务端参数不足。新模式使用 server <bridge_port>，旧模式使用 server <bridge_port> <public_port> <password> [tcp|udp]");
+            if (args.Length < 4) throw new ArgumentException("服务端参数不足。新模式使用 server <bridge_port>，旧模式使用 server <bridge_port> <public_port> <password> [tcp|udp|all]");
             if (args.Length > 5) throw new ArgumentException("服务端参数过多");
 
             if (!int.TryParse(args[1], out int legacyBridgePort)) throw new ArgumentException($"无效的桥接端口: {args[1]}");
             if (!int.TryParse(args[2], out int publicPort)) throw new ArgumentException($"无效的公共端口: {args[2]}");
 
             string password = args[3];
-            ProtocolType protocol = ParseProtocol(args.Length > 4 ? args[4] : null);
+            TunnelProtocol protocol = ParseServerProtocol(args.Length > 4 ? args[4] : null);
 
             var legacyServer = new RpaServer(legacyBridgePort, publicPort, password, protocol);
             await legacyServer.RunAsync();
@@ -75,21 +75,34 @@ namespace SimpleReverseTunnel
             string targetIp = args[3];
             if (!int.TryParse(args[4], out int targetPort)) throw new ArgumentException($"无效的目标端口: {args[4]}");
             string password = args[5];
-            ProtocolType protocol = ParseProtocol(args.Length > 6 ? args[6] : null);
+            TunnelProtocol protocol = ParseClientProtocol(args.Length > 6 ? args[6] : null);
 
             var client = new RpaClient(serverIp, serverPort, targetIp, targetPort, password, protocol);
             await client.RunAsync();
         }
 
-        static ProtocolType ParseProtocol(string? protocolStr)
+        static TunnelProtocol ParseServerProtocol(string? protocolStr)
         {
-            if (string.IsNullOrEmpty(protocolStr)) return ProtocolType.Tcp;
+            if (string.IsNullOrEmpty(protocolStr)) return TunnelProtocol.Tcp;
 
             string normalized = protocolStr.ToLowerInvariant();
-            if (normalized == "tcp") return ProtocolType.Tcp;
-            if (normalized == "udp") return ProtocolType.Udp;
+            if (normalized == "tcp") return TunnelProtocol.Tcp;
+            if (normalized == "udp") return TunnelProtocol.Udp;
+            if (normalized == "all") return TunnelProtocol.All;
 
-            throw new ArgumentException($"不支持的协议参数: '{protocolStr}'。仅支持 'tcp' 或 'udp'。");
+            throw new ArgumentException($"不支持的协议参数: '{protocolStr}'。服务端仅支持 'tcp'、'udp' 或 'all'。");
+        }
+
+        static TunnelProtocol ParseClientProtocol(string? protocolStr)
+        {
+            if (string.IsNullOrEmpty(protocolStr)) return TunnelProtocol.Tcp;
+
+            string normalized = protocolStr.ToLowerInvariant();
+            if (normalized == "tcp") return TunnelProtocol.Tcp;
+            if (normalized == "udp") return TunnelProtocol.Udp;
+            if (normalized == "all") return TunnelProtocol.All;
+
+            throw new ArgumentException($"不支持的协议参数: '{protocolStr}'。客户端仅支持 'tcp'、'udp' 或 'all'。");
         }
 
         static void ShowUsage()
@@ -97,10 +110,10 @@ namespace SimpleReverseTunnel
             Console.WriteLine("SimpleReverseTunnel - 内网穿透工具 (TCP/UDP)");
             Console.WriteLine("用法:");
             Console.WriteLine("  服务端(新): 先设置 REVERSE_TUNNEL_MAP，再运行 SimpleReverseTunnel.exe server <bridge_port>");
-            Console.WriteLine("  服务端(旧): SimpleReverseTunnel.exe server <bridge_port> <public_port> <password> [tcp|udp]");
-            Console.WriteLine("  客户端:     SimpleReverseTunnel.exe client <server_ip> <bridge_port> <target_ip> <target_port> <password> [tcp|udp]");
+            Console.WriteLine("  服务端(旧): SimpleReverseTunnel.exe server <bridge_port> <public_port> <password> [tcp|udp|all]");
+            Console.WriteLine("  客户端:     SimpleReverseTunnel.exe client <server_ip> <bridge_port> <target_ip> <target_port> <password> [tcp|udp|all]");
             Console.WriteLine("示例:");
-            Console.WriteLine("  set REVERSE_TUNNEL_MAP=8080:MySecret1:udp,8081:MySecret2:udp,8082:MySecret3:udp");
+            Console.WriteLine("  set REVERSE_TUNNEL_MAP=8080:MySecret1:tcp,8081:MySecret2:udp,8082:MySecret3:all");
             Console.WriteLine("  SimpleReverseTunnel.exe server 2560");
             Console.WriteLine("  SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 53 MySecret1 udp");
             Console.WriteLine("  SimpleReverseTunnel.exe server 2560 8080 MySecret1 udp");

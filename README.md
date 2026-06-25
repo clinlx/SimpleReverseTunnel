@@ -22,20 +22,21 @@ dotnet build -c Release
 - **Public Port**：供外部用户访问，协议类型由映射配置指定。
 - **Secret**：客户端连接时使用的密码，服务端根据 Secret 自动绑定到对应 Public Port。
 
-> 注意：`tcp` / `udp` 表示被穿透的业务端口协议；服务端和客户端之间的 Bridge Port 通信始终基于 TCP。
+> 注意：`tcp` / `udp` / `all` 表示被穿透的业务端口协议；服务端和客户端之间的 Bridge Port 通信始终基于 TCP。
 > 注意：`REVERSE_TUNNEL_MAP` 中的 Secret 不可重复，否则服务端无法判断客户端应绑定到哪个 Public Port。
+> 注意：`all` 表示同一个 Public Port 同时监听 TCP 和 UDP；新版客户端使用 `all` 时会在一个进程内同时转发 TCP 和 UDP。
 
 #### 新用法（推荐）
 
 ```bash
-# 格式: REVERSE_TUNNEL_MAP=<public_port>:<secret>:<tcp|udp>[,<public_port>:<secret>:<tcp|udp>...]
+# 格式: REVERSE_TUNNEL_MAP=<public_port>:<secret>:<tcp|udp|all>[,<public_port>:<secret>:<tcp|udp|all>...]
 # 格式: SimpleReverseTunnel server <bridge_port>
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:REVERSE_TUNNEL_MAP="8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp"
+$env:REVERSE_TUNNEL_MAP="8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:all"
 dotnet run -- server 2560
 
 # 对于编译后的文件，改为执行：
@@ -45,14 +46,14 @@ SimpleReverseTunnel.exe server 2560
 Windows CMD：
 
 ```bat
-set REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp
+set REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:all
 SimpleReverseTunnel.exe server 2560
 ```
 
 Linux：
 
 ```bash
-export REVERSE_TUNNEL_MAP='8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp'
+export REVERSE_TUNNEL_MAP='8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:all'
 dotnet run -- server 2560
 
 # 对于编译后的文件，改为执行：
@@ -63,7 +64,7 @@ dotnet run -- server 2560
 
 ```bash
 # 格式: SimpleReverseTunnel server <bridge_port> <public_port> <password> [protocol]
-# protocol 可选: tcp 或 udp，表示被穿透的业务端口协议
+# protocol 可选: tcp、udp 或 all，表示被穿透的业务端口协议
 ```
 
 Windows：
@@ -71,6 +72,7 @@ Windows：
 ```powershell
 SimpleReverseTunnel.exe server 2560 8080 WebSecret tcp
 SimpleReverseTunnel.exe server 2560 5353 DnsSecret udp
+SimpleReverseTunnel.exe server 2560 9001 GameSecret all
 ```
 
 Linux：
@@ -78,6 +80,7 @@ Linux：
 ```bash
 ./SimpleReverseTunnel server 2560 8080 WebSecret tcp
 ./SimpleReverseTunnel server 2560 5353 DnsSecret udp
+./SimpleReverseTunnel server 2560 9001 GameSecret all
 ```
 
 ### 2. 客户端（内网机器）
@@ -86,7 +89,7 @@ Linux：
 
 ```bash
 # 格式: SimpleReverseTunnel client <server_ip> <bridge_port> <target_ip> <target_port> <password> [protocol]
-# protocol 可选: tcp 或 udp，表示被穿透的目标业务协议，必须与服务端映射中的协议保持一致
+# protocol 可选: tcp、udp 或 all，表示被穿透的目标业务协议，必须与服务端映射中的协议保持一致
 ```
 
 Windows：
@@ -97,6 +100,9 @@ SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 80 WebSecret tcp
 
 # DnsSecret 绑定到服务端 5353/udp，并转发到内网 127.0.0.1:53
 SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 53 DnsSecret udp
+
+# GameSecret 绑定到服务端 9001/all，并同时转发内网 127.0.0.1:9001 的 TCP 和 UDP
+SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 9001 GameSecret all
 ```
 
 Linux：
@@ -107,6 +113,9 @@ Linux：
 
 # DnsSecret 绑定到服务端 5353/udp，并转发到内网 127.0.0.1:53
 ./SimpleReverseTunnel client 1.2.3.4 2560 127.0.0.1 53 DnsSecret udp
+
+# GameSecret 绑定到服务端 9001/all，并同时转发内网 127.0.0.1:9001 的 TCP 和 UDP
+./SimpleReverseTunnel client 1.2.3.4 2560 127.0.0.1 9001 GameSecret all
 ```
 
 ### 3. 访问
@@ -124,7 +133,7 @@ Linux：
 - `MODE=server`：启动服务端。
 - `MODE=client`：启动客户端。
 
-以下示例中的镜像地址先使用占位符 `REPLACE_ME_IMAGE:latest`，发布时替换为实际镜像地址。
+以下示例使用镜像：`registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest`。
 
 ### 1. 服务端
 
@@ -137,8 +146,8 @@ docker run -d \
   --name tunnel-server \
   -e MODE=server \
   -e BRIDGE_PORT=2560 \
-  -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp \
-  REPLACE_ME_IMAGE:latest
+  -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:all \
+  registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest
 ```
 
 不使用 host 网络模式时，需要显式映射 Bridge Port 和每个 Public Port。TCP 端口使用普通 `-p`，UDP 端口需要加 `/udp`：
@@ -153,8 +162,8 @@ docker run -d \
   -p 9001:9001/udp \
   -e MODE=server \
   -e BRIDGE_PORT=2560 \
-  -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp \
-  REPLACE_ME_IMAGE:latest
+  -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:all \
+  registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest
 ```
 
 ### 2. 客户端
@@ -175,7 +184,7 @@ docker run -d \
   -e TARGET_PORT=80 \
   -e PASSWORD=WebSecret \
   -e PROTOCOL=tcp \
-  REPLACE_ME_IMAGE:latest
+  registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest
 ```
 
 UDP DNS 示例：
@@ -192,7 +201,24 @@ docker run -d \
   -e TARGET_PORT=53 \
   -e PASSWORD=DnsSecret \
   -e PROTOCOL=udp \
-  REPLACE_ME_IMAGE:latest
+  registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest
+```
+
+TCP + UDP 同端口示例：
+
+```bash
+docker run -d \
+  --network host \
+  --restart unless-stopped \
+  --name tunnel-client-game \
+  -e MODE=client \
+  -e SERVER_IP=1.2.3.4 \
+  -e SERVER_PORT=2560 \
+  -e TARGET_IP=127.0.0.1 \
+  -e TARGET_PORT=9001 \
+  -e PASSWORD=GameSecret \
+  -e PROTOCOL=all \
+  registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest
 ```
 
 如果客户端容器不使用 host 网络模式，容器内的 `127.0.0.1` 只代表容器本身，不能直接访问宿主机服务。此时应将 `TARGET_IP` 设置为宿主机在容器可达网络中的 IP，或使用 Docker 提供的宿主机地址（例如 Docker Desktop 的 `host.docker.internal`）。
@@ -209,6 +235,6 @@ docker build -f Dockerfile -t simple-reverse-tunnel .
 
 #### 3.2 运行自构建镜像
 
-构建完成后，将上面 `docker run` 命令中的 `REPLACE_ME_IMAGE:latest` 替换为 `simple-reverse-tunnel:latest` 即可。
+构建完成后，将上面 `docker run` 命令中的镜像地址替换为 `simple-reverse-tunnel:latest` 即可。
 
-> **注意**：`REPLACE_ME_IMAGE:latest` 是占位符，发布时替换为实际镜像仓库地址。
+> **注意**：默认示例使用 `registry.cn-hangzhou.aliyuncs.com/algorithm_space/simple_reverse_tunnel:latest`，自行构建时可替换为自己的镜像名称。

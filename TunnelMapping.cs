@@ -1,8 +1,6 @@
-using System.Net.Sockets;
-
 namespace SimpleReverseTunnel
 {
-    public sealed record TunnelMapping(int PublicPort, string Password, ProtocolType Protocol)
+    public sealed record TunnelMapping(int PublicPort, string Password, TunnelProtocol Protocol)
     {
         public const string EnvironmentVariableName = "REVERSE_TUNNEL_MAP";
 
@@ -51,14 +49,15 @@ namespace SimpleReverseTunnel
             return mappings;
         }
 
-        private static ProtocolType ParseProtocol(string value)
+        private static TunnelProtocol ParseProtocol(string value)
         {
             string normalized = value.ToLowerInvariant();
             return normalized switch
             {
-                "tcp" => ProtocolType.Tcp,
-                "udp" => ProtocolType.Udp,
-                _ => throw new ArgumentException($"不支持的协议参数: '{value}'。仅支持 'tcp' 或 'udp'。")
+                "tcp" => TunnelProtocol.Tcp,
+                "udp" => TunnelProtocol.Udp,
+                "all" => TunnelProtocol.All,
+                _ => throw new ArgumentException($"不支持的协议参数: '{value}'。仅支持 'tcp'、'udp' 或 'all'。")
             };
         }
     }
