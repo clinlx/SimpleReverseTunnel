@@ -119,6 +119,13 @@ Linux：
 
 本项目支持 Docker 部署，并提供基于 `ubuntu:22.04` 的 Native AOT 镜像。
 
+统一镜像通过 `MODE` 环境变量决定启动服务端或客户端：
+
+- `MODE=server`：启动服务端。
+- `MODE=client`：启动客户端。
+
+以下示例中的镜像地址先使用占位符 `REPLACE_ME_IMAGE:latest`，发布时替换为实际镜像地址。
+
 ### 1. 服务端
 
 使用 host 网络模式时，容器直接监听宿主机端口：
@@ -128,9 +135,10 @@ docker run -d \
   --network host \
   --restart unless-stopped \
   --name tunnel-server \
+  -e MODE=server \
   -e BRIDGE_PORT=2560 \
   -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp \
-  swr.cn-south-1.myhuaweicloud.com/tunnel/simple-reverse-tunnel-server:latest
+  REPLACE_ME_IMAGE:latest
 ```
 
 不使用 host 网络模式时，需要显式映射 Bridge Port 和每个 Public Port。TCP 端口使用普通 `-p`，UDP 端口需要加 `/udp`：
@@ -143,9 +151,10 @@ docker run -d \
   -p 8080:8080/tcp \
   -p 5353:5353/udp \
   -p 9001:9001/udp \
+  -e MODE=server \
   -e BRIDGE_PORT=2560 \
   -e REVERSE_TUNNEL_MAP=8080:WebSecret:tcp,5353:DnsSecret:udp,9001:GameSecret:udp \
-  swr.cn-south-1.myhuaweicloud.com/tunnel/simple-reverse-tunnel-server:latest
+  REPLACE_ME_IMAGE:latest
 ```
 
 ### 2. 客户端
@@ -159,12 +168,14 @@ docker run -d \
   --network host \
   --restart unless-stopped \
   --name tunnel-client-web \
+  -e MODE=client \
   -e SERVER_IP=1.2.3.4 \
   -e SERVER_PORT=2560 \
   -e TARGET_IP=127.0.0.1 \
   -e TARGET_PORT=80 \
   -e PASSWORD=WebSecret \
-  swr.cn-south-1.myhuaweicloud.com/tunnel/simple-reverse-tunnel-client:latest
+  -e PROTOCOL=tcp \
+  REPLACE_ME_IMAGE:latest
 ```
 
 UDP DNS 示例：
@@ -174,12 +185,14 @@ docker run -d \
   --network host \
   --restart unless-stopped \
   --name tunnel-client-dns \
+  -e MODE=client \
   -e SERVER_IP=1.2.3.4 \
   -e SERVER_PORT=2560 \
   -e TARGET_IP=127.0.0.1 \
   -e TARGET_PORT=53 \
   -e PASSWORD=DnsSecret \
-  swr.cn-south-1.myhuaweicloud.com/tunnel/simple-reverse-tunnel-client:latest
+  -e PROTOCOL=udp \
+  REPLACE_ME_IMAGE:latest
 ```
 
 如果客户端容器不使用 host 网络模式，容器内的 `127.0.0.1` 只代表容器本身，不能直接访问宿主机服务。此时应将 `TARGET_IP` 设置为宿主机在容器可达网络中的 IP，或使用 Docker 提供的宿主机地址（例如 Docker Desktop 的 `host.docker.internal`）。
@@ -188,20 +201,14 @@ docker run -d \
 
 如果想自行构建镜像，可以参考以下步骤：
 
-#### 3.1 构建服务端镜像
+#### 3.1 构建统一镜像
 
 ```bash
-docker build -f Dockerfile_server -t simple-reverse-tunnel-server .
+docker build -f Dockerfile -t simple-reverse-tunnel .
 ```
 
-#### 3.2 构建客户端镜像
+#### 3.2 运行自构建镜像
 
-```bash
-docker build -f Dockerfile_client -t simple-reverse-tunnel-client .
-```
+构建完成后，将上面 `docker run` 命令中的 `REPLACE_ME_IMAGE:latest` 替换为 `simple-reverse-tunnel:latest` 即可。
 
-#### 3.3 运行自构建镜像
-
-构建完成后，将上面 `docker run` 命令中的镜像名称替换为刚构建的名称即可。
-
-> **注意**：默认提供的镜像仓库地址（`swr.cn-south-1.myhuaweicloud.com/tunnel/...`）仅供示例或特定部署使用。如果 fork 本项目，建议修改 `.github/workflows/docker-build.yml` 中的仓库配置，并配置自己的 Secrets。
+> **注意**：`REPLACE_ME_IMAGE:latest` 是占位符，发布时替换为实际镜像仓库地址。
