@@ -5,6 +5,8 @@ namespace SimpleReverseTunnel
 {
     public static class Logger
     {
+        private const string TimeZoneEnvironmentVariable = "TZ";
+
         public enum LogLevel
         {
             Info = 0,
@@ -58,10 +60,36 @@ namespace SimpleReverseTunnel
             lock (_lock)
             {
                 Console.ForegroundColor = color;
-                Console.Write($"[{DateTime.Now:HH:mm:ss}] [{level}] ");
+                Console.Write($"[{GetCurrentLogTime():yyyy-MM-dd HH:mm:ss}] [{level}] ");
                 Console.WriteLine(message);
                 Console.ResetColor();
             }
+        }
+
+        private static DateTimeOffset GetCurrentLogTime()
+        {
+            TimeZoneInfo timeZone = GetConfiguredTimeZone();
+            return TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, timeZone);
+        }
+
+        private static TimeZoneInfo GetConfiguredTimeZone()
+        {
+            string? timeZoneId = Environment.GetEnvironmentVariable(TimeZoneEnvironmentVariable);
+            if (!string.IsNullOrWhiteSpace(timeZoneId))
+            {
+                try
+                {
+                    return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+                }
+                catch (TimeZoneNotFoundException)
+                {
+                }
+                catch (InvalidTimeZoneException)
+                {
+                }
+            }
+
+            return TimeZoneInfo.Local;
         }
     }
 }
