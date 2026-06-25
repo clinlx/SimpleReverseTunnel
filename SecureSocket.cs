@@ -16,12 +16,34 @@ namespace SimpleReverseTunnel
         private int _sendIndex;
         private int _recvIndex;
 
-        public SecureSocket(Socket socket, string password)
+        public SecureSocket(Socket socket, string password, int initialReceiveIndex = 0)
+            : this(socket, DeriveKey(password), initialReceiveIndex)
+        {
+        }
+
+        public SecureSocket(Socket socket, byte[] key, int initialReceiveIndex = 0)
         {
             InnerSocket = socket;
-            // SHA256 确保密钥分布均匀
+            _key = key;
+            _recvIndex = initialReceiveIndex;
+        }
+
+        public static byte[] DeriveKey(string password)
+        {
             using var sha256 = SHA256.Create();
-            _key = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+            return sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+        }
+
+        public static void ApplyXor(string password, Span<byte> data, int keyOffset = 0)
+        {
+            byte[] key = DeriveKey(password);
+            ApplyXor(data, key, keyOffset);
+        }
+
+        public static void ApplyXor(byte[] key, ReadOnlySpan<byte> source, Span<byte> destination, int keyOffset = 0)
+        {
+            source.CopyTo(destination);
+            ApplyXor(destination, key, keyOffset);
         }
 
         public bool Connected => InnerSocket.Connected;
@@ -32,7 +54,7 @@ namespace SimpleReverseTunnel
             int read = await InnerSocket.ReceiveAsync(buffer, SocketFlags.None, cancellationToken);
             if (read > 0)
             {
-                ApplyXor(buffer.Span.Slice(0, read), ref _recvIndex);
+                ApplyXor(buffer.Span.Slice(0, read), _key, ref _recvIndex);
             }
             return read;
         }
@@ -44,7 +66,7 @@ namespace SimpleReverseTunnel
             try
             {
                 buffer.Span.CopyTo(temp);
-                ApplyXor(temp.AsSpan(0, buffer.Length), ref _sendIndex);
+                ApplyXor(temp.AsSpan(0, buffer.Length), _key, ref _sendIndex);
                 await InnerSocket.SendAsync(temp.AsMemory(0, buffer.Length), SocketFlags.None);
             }
             finally
@@ -54,23 +76,27 @@ namespace SimpleReverseTunnel
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ApplyXor(Span<byte> data, ref int keyIndex)
+        private static void ApplyXor(Span<byte> data, byte[] key, ref int keyIndex)
+        {
+            ApplyXor(data, key, keyIndex);
+            keyIndex = (keyIndex + data.Length) % int.MaxValue;
+        }
+
+        private static void ApplyXor(Span<byte> data, byte[] key, int keyOffset)
         {
             int i = 0;
             int len = data.Length;
-            int kLen = _key.Length;
+            int kLen = key.Length;
 
             // 避免循环中取模
-            int kIdx = keyIndex % kLen;
+            int kIdx = keyOffset % kLen;
             
             for (; i < len; i++)
             {
-                data[i] ^= _key[kIdx];
+                data[i] ^= key[kIdx];
                 kIdx++;
                 if (kIdx == kLen) kIdx = 0;
             }
-            
-            keyIndex = (keyIndex + len) % int.MaxValue;
         }
 
         public void Shutdown(SocketShutdown how) => InnerSocket.Shutdown(how);

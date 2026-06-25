@@ -22,9 +22,8 @@ WORKDIR /app
 COPY --from=build /app/publish .
 
 # Environment variables for configuration
-ENV BRIDGE_PORT=9000
-ENV PUBLIC_PORT=9001
-ENV PASSWORD=MySecret
+ENV BRIDGE_PORT=2560
+ENV REVERSE_TUNNEL_MAP=8080:MySecret:tcp
 
 # Set the entrypoint to use environment variables
-ENTRYPOINT ["/bin/sh", "-c", "exec ./SimpleReverseTunnel server $BRIDGE_PORT $PUBLIC_PORT $PASSWORD"]
+ENTRYPOINT ["/bin/sh", "-c", "exec ./SimpleReverseTunnel server $BRIDGE_PORT"]

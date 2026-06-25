@@ -1,79 +1,93 @@
-using System;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace SimpleReverseTunnel
 {
     public class RpaServer
     {
+        private const int ControlCommandLength = 17;
+        private const int ControlHandshakeLength = 5;
+        private const int DataHandshakeLength = 21;
+
         private readonly int _bridgePort;
-        private readonly int _publicPort;
-        private readonly string _password;
-        private readonly System.Net.Sockets.ProtocolType _protocol;
+        private readonly IReadOnlyList<TunnelContext> _contexts;
+        private readonly TcpListener _bridgeListener;
 
-        private TcpListener _bridgeListener;
-        private TcpListener? _publicListener;
-        private Socket? _publicUdpSocket;
-        
-        // 控制连接：同一时间只允许一个活动代理
-        private SecureSocket? _controlSocket;
-        private readonly object _controlLock = new();
+        private sealed class TunnelContext
+        {
+            public TunnelContext(TunnelMapping mapping)
+            {
+                Mapping = mapping;
+                Key = SecureSocket.DeriveKey(mapping.Password);
+                if (mapping.Protocol == ProtocolType.Tcp)
+                {
+                    PublicListener = new TcpListener(IPAddress.Any, mapping.PublicPort);
+                }
+            }
 
-        // 挂起的连接：ID -> Socket (来自桥接的数据连接)
-        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<SecureSocket>> _pendingConnections = new();
+            public TunnelMapping Mapping { get; }
+            public byte[] Key { get; }
+            public TcpListener? PublicListener { get; }
+            public Socket? PublicUdpSocket { get; set; }
+            public SecureSocket? ControlSocket { get; set; }
+            public object ControlLock { get; } = new();
+            public SemaphoreSlim ControlSendLock { get; } = new(1, 1);
+            public ConcurrentDictionary<Guid, TaskCompletionSource<SecureSocket>> PendingConnections { get; } = new();
+            public ConcurrentDictionary<EndPoint, UdpSession> UdpSessions { get; } = new();
+        }
 
-        // UDP 会话管理
-        private class UdpSession
+        private sealed class UdpSession
         {
             public SecureSocket? BridgeSocket;
             public DateTime LastActive;
-            public readonly object Lock = new();
             public TaskCompletionSource<SecureSocket> ConnectTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
-        private readonly ConcurrentDictionary<EndPoint, UdpSession> _udpSessions = new();
 
-        public RpaServer(int bridgePort, int publicPort, string password, System.Net.Sockets.ProtocolType protocol = System.Net.Sockets.ProtocolType.Tcp)
+        public RpaServer(int bridgePort, int publicPort, string password, ProtocolType protocol = ProtocolType.Tcp)
+            : this(bridgePort, new[] { new TunnelMapping(publicPort, password, protocol) })
         {
-            _bridgePort = bridgePort;
-            _publicPort = publicPort;
-            _password = password;
-            _protocol = protocol;
+        }
 
-            _bridgeListener = new TcpListener(IPAddress.Any, _bridgePort);
-            if (_protocol == System.Net.Sockets.ProtocolType.Tcp)
+        public RpaServer(int bridgePort, IReadOnlyList<TunnelMapping> mappings)
+        {
+            if (mappings.Count == 0)
             {
-                _publicListener = new TcpListener(IPAddress.Any, _publicPort);
+                throw new ArgumentException("至少需要一个端口映射");
             }
+
+            _bridgePort = bridgePort;
+            _contexts = mappings.Select(mapping => new TunnelContext(mapping)).ToArray();
+            _bridgeListener = new TcpListener(IPAddress.Any, _bridgePort);
         }
 
         public async Task RunAsync()
         {
             Logger.Info("服务端启动...");
-            Logger.Info($"模式: {_protocol}");
             Logger.Info($"桥接端口: {_bridgePort} (Tcp)");
-            Logger.Info($"公共端口: {_publicPort} ({_protocol})");
-            // Logger.Info($"Password: {_password}"); // 不要记录密码
+            foreach (TunnelContext context in _contexts)
+            {
+                Logger.Info($"公共端口: {context.Mapping.PublicPort} ({context.Mapping.Protocol})");
+            }
 
             _bridgeListener.Start();
-            
-            Task publicTask;
-            if (_protocol == System.Net.Sockets.ProtocolType.Tcp)
+
+            var tasks = new List<Task> { AcceptBridgeConnectionsAsync() };
+            foreach (TunnelContext context in _contexts)
             {
-                _publicListener!.Start();
-                publicTask = AcceptPublicConnectionsAsync();
-            }
-            else
-            {
-                publicTask = AcceptPublicUdpAsync();
+                if (context.Mapping.Protocol == ProtocolType.Tcp)
+                {
+                    context.PublicListener!.Start();
+                    tasks.Add(AcceptPublicConnectionsAsync(context));
+                }
+                else
+                {
+                    tasks.Add(AcceptPublicUdpAsync(context));
+                }
             }
 
-            var bridgeTask = AcceptBridgeConnectionsAsync();
-            
             Logger.Info("服务已就绪，等待连接...");
-            await Task.WhenAll(bridgeTask, publicTask);
+            await Task.WhenAll(tasks);
             Logger.Info("服务意外停止");
         }
 
@@ -84,7 +98,7 @@ namespace SimpleReverseTunnel
             {
                 try
                 {
-                    var socket = await _bridgeListener.AcceptSocketAsync();
+                    Socket socket = await _bridgeListener.AcceptSocketAsync();
                     _ = HandleBridgeHandshakeAsync(socket);
                 }
                 catch (Exception ex)
@@ -97,86 +111,110 @@ namespace SimpleReverseTunnel
 
         private async Task HandleBridgeHandshakeAsync(Socket rawSocket)
         {
-            var socket = new SecureSocket(rawSocket, _password);
             try
             {
                 using var cts = new CancellationTokenSource(5000);
-                var (success, type, connId) = await NetworkHelper.ReceiveHandshakeAsync(socket, cts.Token);
-                
-                if (!success)
+                byte[] controlHandshake = new byte[ControlHandshakeLength];
+                if (!await ReadRawExactAsync(rawSocket, controlHandshake, cts.Token))
                 {
-                    Logger.Warn($"认证失败: {socket.RemoteEndPoint}");
-                    socket.Dispose();
+                    NetworkHelper.CleanupSocket(rawSocket);
                     return;
                 }
-                
-                Logger.Info($"握手成功: {type} {connId}");
 
-                if (type == NetworkHelper.ConnectionType.Control)
+                HandshakeMatch? match = TryMatchHandshake(controlHandshake, null);
+                if (match == null && TryGetConnectionType(controlHandshake, out NetworkHelper.ConnectionType type) && type == NetworkHelper.ConnectionType.Data)
                 {
-                    lock (_controlLock)
+                    byte[] dataHandshake = new byte[DataHandshakeLength];
+                    controlHandshake.CopyTo(dataHandshake, 0);
+                    if (!await ReadRawExactAsync(rawSocket, dataHandshake.AsMemory(ControlHandshakeLength), cts.Token))
                     {
-                        if (!IsControlSocketUsable(_controlSocket))
-                        {
-                            ClearControlSocketUnderLock(_controlSocket);
-                        }
-
-                        if (_controlSocket != null)
-                        {
-                            Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {_controlSocket.RemoteEndPoint}");
-                            socket.Dispose();
-                            return;
-                        }
+                        NetworkHelper.CleanupSocket(rawSocket);
+                        return;
                     }
 
-                    RegisterControlSocket(socket);
-                    _ = SendHeartbeatsAsync(socket);
-                    await MonitorControlConnectionAsync(socket);
+                    match = TryMatchHandshake(dataHandshake, NetworkHelper.ConnectionType.Data);
                 }
-                else if (type == NetworkHelper.ConnectionType.Data)
+
+                if (match == null)
                 {
-                    if (_pendingConnections.TryGetValue(connId, out var tcs))
+                    Logger.Warn($"认证失败: {rawSocket.RemoteEndPoint}");
+                    NetworkHelper.CleanupSocket(rawSocket);
+                    return;
+                }
+
+                var secureSocket = new SecureSocket(rawSocket, match.Context.Key, match.ConsumedBytes);
+                Logger.Info($"握手成功: {match.Type} {match.ConnectionId}");
+
+                if (match.Type == NetworkHelper.ConnectionType.Control)
+                {
+                    if (RegisterControlConnection(match.Context, secureSocket))
                     {
-                        tcs.TrySetResult(socket);
+                        _ = SendHeartbeatsAsync(match.Context, secureSocket);
+                        await MonitorControlConnectionAsync(match.Context, secureSocket);
                     }
-                    else
-                    {
-                        Logger.Warn($"无效数据连接ID: {connId}");
-                        socket.Dispose();
-                    }
+                }
+                else if (match.Context.PendingConnections.TryGetValue(match.ConnectionId, out var tcs))
+                {
+                    tcs.TrySetResult(secureSocket);
+                }
+                else
+                {
+                    Logger.Warn($"无效数据连接ID: {match.ConnectionId}");
+                    secureSocket.Dispose();
                 }
             }
             catch (Exception ex)
             {
                 Logger.Error($"握手异常: {ex.Message}");
-                socket.Dispose();
+                NetworkHelper.CleanupSocket(rawSocket);
             }
         }
 
-        private async Task SendHeartbeatsAsync(SecureSocket socket)
+        private bool RegisterControlConnection(TunnelContext context, SecureSocket socket)
+        {
+            lock (context.ControlLock)
+            {
+                if (!IsControlSocketUsable(context.ControlSocket))
+                {
+                    ClearControlSocketUnderLock(context, context.ControlSocket);
+                }
+
+                if (context.ControlSocket != null)
+                {
+                    Logger.Warn($"拒绝新的控制连接 {socket.RemoteEndPoint}: 已有活动连接 {context.ControlSocket.RemoteEndPoint}");
+                    socket.Dispose();
+                    return false;
+                }
+
+                context.ControlSocket = socket;
+                Logger.Info($"控制连接已注册: {socket.RemoteEndPoint}");
+                return true;
+            }
+        }
+
+        private async Task SendHeartbeatsAsync(TunnelContext context, SecureSocket socket)
         {
             try
             {
-                byte[] heartbeat = new byte[17]; // 命令(1) + 填充(16)
+                byte[] heartbeat = new byte[ControlCommandLength];
                 heartbeat[0] = 0x00;
-                
+
                 while (socket.Connected)
                 {
                     await Task.Delay(5000);
-                    await SendControlCommandAsync(socket, heartbeat);
+                    await SendControlCommandAsync(context, socket, heartbeat);
                 }
             }
             catch
             {
-                // 心跳失败，可能已断开连接
             }
             finally
             {
-                CleanupControlSocket(socket);
+                CleanupControlSocket(context, socket);
             }
         }
 
-        private async Task MonitorControlConnectionAsync(SecureSocket socket)
+        private async Task MonitorControlConnectionAsync(TunnelContext context, SecureSocket socket)
         {
             try
             {
@@ -189,10 +227,8 @@ namespace SimpleReverseTunnel
                         Logger.Info("客户端控制连接已断开");
                         break;
                     }
-                    else
-                    {
-                         Logger.Warn($"控制连接收到异常数据 ({read} bytes)，已忽略");
-                    }
+
+                    Logger.Warn($"控制连接收到异常数据 ({read} bytes)，已忽略");
                 }
             }
             catch (Exception ex)
@@ -201,32 +237,32 @@ namespace SimpleReverseTunnel
             }
             finally
             {
-                CleanupControlSocket(socket);
+                CleanupControlSocket(context, socket);
             }
         }
 
-        private void CleanupControlSocket(SecureSocket socket)
+        private void CleanupControlSocket(TunnelContext context, SecureSocket socket)
         {
-            lock (_controlLock)
+            lock (context.ControlLock)
             {
-                if (_controlSocket == socket)
+                if (context.ControlSocket == socket)
                 {
-                    ClearControlSocketUnderLock(socket);
+                    ClearControlSocketUnderLock(context, socket);
                 }
             }
             socket.Dispose();
         }
 
-        private SecureSocket? GetActiveControlSocket()
+        private SecureSocket? GetActiveControlSocket(TunnelContext context)
         {
-            lock (_controlLock)
+            lock (context.ControlLock)
             {
-                if (!IsControlSocketUsable(_controlSocket))
+                if (!IsControlSocketUsable(context.ControlSocket))
                 {
-                    ClearControlSocketUnderLock(_controlSocket);
+                    ClearControlSocketUnderLock(context, context.ControlSocket);
                 }
 
-                return _controlSocket;
+                return context.ControlSocket;
             }
         }
 
@@ -248,46 +284,31 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private void ClearControlSocketUnderLock(SecureSocket? socket)
+        private static void ClearControlSocketUnderLock(TunnelContext context, SecureSocket? socket)
         {
             if (socket == null)
             {
                 return;
             }
 
-            if (_controlSocket == socket)
+            if (context.ControlSocket == socket)
             {
-                _controlSocket = null;
+                context.ControlSocket = null;
                 Logger.Info("控制连接已清理");
             }
 
             socket.Dispose();
         }
 
-        private void RegisterControlSocket(SecureSocket socket)
+        private async Task AcceptPublicConnectionsAsync(TunnelContext context)
         {
-            lock (_controlLock)
-            {
-                if (_controlSocket != null)
-                {
-                    Logger.Info("替换旧的控制连接");
-                    _controlSocket.Dispose();
-                }
-                _controlSocket = socket;
-                Logger.Info($"控制连接已注册: {socket.RemoteEndPoint}");
-            }
-        }
-
-        private async Task AcceptPublicConnectionsAsync()
-        {
-            if (_publicListener == null) return;
-            Logger.Info("监听公共连接...");
+            Logger.Info($"监听公共连接: {context.Mapping.PublicPort} (Tcp)");
             while (true)
             {
                 try
                 {
-                    var userSocket = await _publicListener.AcceptSocketAsync();
-                    _ = HandleUserConnectionAsync(userSocket);
+                    Socket userSocket = await context.PublicListener!.AcceptSocketAsync();
+                    _ = HandleUserConnectionAsync(context, userSocket);
                 }
                 catch (Exception ex)
                 {
@@ -297,36 +318,28 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private async Task HandleUserConnectionAsync(Socket userSocket)
+        private async Task HandleUserConnectionAsync(TunnelContext context, Socket userSocket)
         {
-            SecureSocket? control = GetActiveControlSocket();
-
+            SecureSocket? control = GetActiveControlSocket(context);
             if (control == null)
             {
-                // Logger.Warn("没有活动的代理连接，拒绝用户请求。");
                 NetworkHelper.CleanupSocket(userSocket);
                 return;
             }
 
             Guid connId = Guid.NewGuid();
-            // Logger.Info($"新用户请求 {connId}");
-
             var tcs = new TaskCompletionSource<SecureSocket>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingConnections[connId] = tcs;
+            context.PendingConnections[connId] = tcs;
 
             try
             {
-                // 发送请求给客户端
-                // 协议: [命令(1)] [连接ID(16)]
-                byte[] cmd = new byte[17];
-                cmd[0] = 0x01; // RequestConnect
+                byte[] cmd = new byte[ControlCommandLength];
+                cmd[0] = 0x01;
                 connId.TryWriteBytes(cmd.AsSpan(1));
-                
-                await SendControlCommandAsync(control, cmd);
 
-                // 等待数据连接
-                var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(10000));
-                
+                await SendControlCommandAsync(context, control, cmd);
+
+                Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(10000));
                 if (completedTask == tcs.Task)
                 {
                     SecureSocket bridgeDataSocket = await tcs.Task;
@@ -334,8 +347,6 @@ namespace SimpleReverseTunnel
                 }
                 else
                 {
-                    // 超时
-                    // Logger.Warn($"等待桥接数据超时 {connId}");
                     NetworkHelper.CleanupSocket(userSocket);
                 }
             }
@@ -346,32 +357,29 @@ namespace SimpleReverseTunnel
             }
             finally
             {
-                _pendingConnections.TryRemove(connId, out _);
+                context.PendingConnections.TryRemove(connId, out _);
             }
         }
 
-        private readonly SemaphoreSlim _controlSendLock = new(1, 1);
-        private async Task SendControlCommandAsync(SecureSocket socket, byte[] data)
+        private static async Task SendControlCommandAsync(TunnelContext context, SecureSocket socket, byte[] data)
         {
-            await _controlSendLock.WaitAsync();
+            await context.ControlSendLock.WaitAsync();
             try
             {
                 await socket.SendAsync(data);
             }
             finally
             {
-                _controlSendLock.Release();
+                context.ControlSendLock.Release();
             }
         }
 
-        private async Task AcceptPublicUdpAsync()
+        private async Task AcceptPublicUdpAsync(TunnelContext context)
         {
-            Logger.Info("监听公共连接 (UDP)...");
-            _publicUdpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
-            _publicUdpSocket.Bind(new IPEndPoint(IPAddress.Any, _publicPort));
-            
-            // 启动清理任务
-            _ = CleanupUdpSessionsAsync();
+            Logger.Info($"监听公共连接: {context.Mapping.PublicPort} (Udp)");
+            context.PublicUdpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            context.PublicUdpSocket.Bind(new IPEndPoint(IPAddress.Any, context.Mapping.PublicPort));
+            _ = CleanupUdpSessionsAsync(context);
 
             byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65535);
             EndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
@@ -382,14 +390,8 @@ namespace SimpleReverseTunnel
                 {
                     try
                     {
-                        var result = await _publicUdpSocket.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP);
-                        // result.RemoteEndPoint is the source
-                        
-                        int len = result.ReceivedBytes;
-                        byte[] packetData = System.Buffers.ArrayPool<byte>.Shared.Rent(len);
-                        Array.Copy(buffer, packetData, len);
-                        
-                        _ = HandleUdpPacketAsync(packetData, len, result.RemoteEndPoint);
+                        SocketReceiveFromResult result = await context.PublicUdpSocket.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP);
+                        _ = HandleUdpPacketAsync(context, result.RemoteEndPoint, buffer.AsMemory(0, result.ReceivedBytes));
                     }
                     catch (Exception ex)
                     {
@@ -404,68 +406,70 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private async Task CleanupUdpSessionsAsync()
+        private async Task CleanupUdpSessionsAsync(TunnelContext context)
         {
             while (true)
             {
                 await Task.Delay(30000);
-                var now = DateTime.UtcNow;
-                foreach (var kvp in _udpSessions)
+                DateTime now = DateTime.UtcNow;
+                foreach (var pair in context.UdpSessions.ToArray())
                 {
-                    if ((now - kvp.Value.LastActive).TotalSeconds > 60)
+                    if ((now - pair.Value.LastActive).TotalSeconds > 60)
                     {
-                        if (_udpSessions.TryRemove(kvp.Key, out var session))
+                        if (context.UdpSessions.TryRemove(pair.Key, out UdpSession? session))
                         {
-                            try { session.BridgeSocket?.Dispose(); } catch {}
+                            try { session.BridgeSocket?.Dispose(); } catch { }
                         }
                     }
                 }
             }
         }
 
-        private async Task HandleUdpPacketAsync(byte[] data, int len, EndPoint remoteEP)
+        private async Task HandleUdpPacketAsync(TunnelContext context, EndPoint remoteEP, ReadOnlyMemory<byte> packet)
         {
+            byte[] data = System.Buffers.ArrayPool<byte>.Shared.Rent(packet.Length);
             try
             {
-                // Logger.Info($"收到UDP数据包: {len} bytes 来自 {remoteEP}"); // 高频日志已注释
-                UdpSession? session;
+                packet.CopyTo(data);
+                int len = packet.Length;
+
                 bool isNew = false;
-                
-                if (!_udpSessions.TryGetValue(remoteEP, out session))
+                if (!context.UdpSessions.TryGetValue(remoteEP, out UdpSession? session))
                 {
-                    session = new UdpSession { LastActive = DateTime.UtcNow };
-                    if (_udpSessions.TryAdd(remoteEP, session))
+                    var newSession = new UdpSession { LastActive = DateTime.UtcNow };
+                    if (context.UdpSessions.TryAdd(remoteEP, newSession))
                     {
+                        session = newSession;
                         isNew = true;
                     }
                     else
                     {
-                        _udpSessions.TryGetValue(remoteEP, out session);
+                        context.UdpSessions.TryGetValue(remoteEP, out session);
                     }
                 }
-                
-                if (session == null) return;
+
+                if (session == null)
+                {
+                    return;
+                }
 
                 session.LastActive = DateTime.UtcNow;
-
                 if (isNew)
                 {
-                    _ = InitializeUdpSessionAsync(session, remoteEP);
+                    _ = InitializeUdpSessionAsync(context, session, remoteEP);
                 }
 
                 try
                 {
                     SecureSocket bridgeSocket = await session.ConnectTcs.Task;
-                    
-                    // 合并头和数据以减少系统调用和开销
                     int totalLen = len + 2;
                     byte[] sendBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(totalLen);
                     try
                     {
                         sendBuffer[0] = (byte)(len >> 8);
-                        sendBuffer[1] = (byte)(len);
+                        sendBuffer[1] = (byte)len;
                         Array.Copy(data, 0, sendBuffer, 2, len);
-                        
+
                         await bridgeSocket.SendAsync(sendBuffer.AsMemory(0, totalLen));
                     }
                     finally
@@ -475,7 +479,7 @@ namespace SimpleReverseTunnel
                 }
                 catch
                 {
-                    _udpSessions.TryRemove(remoteEP, out _);
+                    context.UdpSessions.TryRemove(remoteEP, out _);
                 }
             }
             finally
@@ -484,10 +488,9 @@ namespace SimpleReverseTunnel
             }
         }
 
-        private async Task InitializeUdpSessionAsync(UdpSession session, EndPoint remoteEP)
+        private async Task InitializeUdpSessionAsync(TunnelContext context, UdpSession session, EndPoint remoteEP)
         {
-            SecureSocket? control = GetActiveControlSocket();
-
+            SecureSocket? control = GetActiveControlSocket(context);
             if (control == null)
             {
                 session.ConnectTcs.TrySetException(new Exception("No control connection"));
@@ -496,24 +499,22 @@ namespace SimpleReverseTunnel
 
             Guid connId = Guid.NewGuid();
             var tcs = new TaskCompletionSource<SecureSocket>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingConnections[connId] = tcs;
+            context.PendingConnections[connId] = tcs;
 
             try
             {
-                byte[] cmd = new byte[17];
-                cmd[0] = 0x01; // RequestConnect
+                byte[] cmd = new byte[ControlCommandLength];
+                cmd[0] = 0x01;
                 connId.TryWriteBytes(cmd.AsSpan(1));
-                
-                await SendControlCommandAsync(control, cmd);
 
-                var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(5000));
+                await SendControlCommandAsync(context, control, cmd);
+
+                Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(5000));
                 if (completedTask == tcs.Task)
                 {
                     session.BridgeSocket = await tcs.Task;
                     session.ConnectTcs.TrySetResult(session.BridgeSocket);
-                    
-                    // Start reading from bridge to send back to UDP
-                    _ = ProcessBridgeToUdpAsync(session, remoteEP);
+                    _ = ProcessBridgeToUdpAsync(context, session, remoteEP);
                 }
                 else
                 {
@@ -526,29 +527,26 @@ namespace SimpleReverseTunnel
             }
             finally
             {
-                _pendingConnections.TryRemove(connId, out _);
+                context.PendingConnections.TryRemove(connId, out _);
             }
         }
 
-        private async Task ProcessBridgeToUdpAsync(UdpSession session, EndPoint remoteEP)
+        private async Task ProcessBridgeToUdpAsync(TunnelContext context, UdpSession session, EndPoint remoteEP)
         {
             byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65535);
             try
             {
                 byte[] lenBuf = new byte[2];
-                var socket = session.BridgeSocket!;
+                SecureSocket socket = session.BridgeSocket!;
 
                 while (true)
                 {
                     if (!await NetworkHelper.ReadExactAsync(socket, lenBuf)) break;
                     int len = (lenBuf[0] << 8) | lenBuf[1];
-                    
                     if (len > buffer.Length) break;
-
                     if (!await NetworkHelper.ReadExactAsync(socket, buffer.AsMemory(0, len))) break;
 
-                    // Logger.Info($"转发UDP响应: {len} bytes 到 {remoteEP}");
-                    await _publicUdpSocket!.SendToAsync(buffer.AsMemory(0, len), SocketFlags.None, remoteEP);
+                    await context.PublicUdpSocket!.SendToAsync(buffer.AsMemory(0, len), SocketFlags.None, remoteEP);
                     session.LastActive = DateTime.UtcNow;
                 }
             }
@@ -558,9 +556,78 @@ namespace SimpleReverseTunnel
             finally
             {
                 System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
-                _udpSessions.TryRemove(remoteEP, out _);
-                try { session.BridgeSocket?.Dispose(); } catch {}
+                context.UdpSessions.TryRemove(remoteEP, out _);
+                try { session.BridgeSocket?.Dispose(); } catch { }
             }
+        }
+
+        private sealed record HandshakeMatch(TunnelContext Context, NetworkHelper.ConnectionType Type, Guid ConnectionId, int ConsumedBytes);
+
+        private HandshakeMatch? TryMatchHandshake(byte[] encryptedHandshake, NetworkHelper.ConnectionType? expectedType)
+        {
+            Span<byte> candidate = stackalloc byte[DataHandshakeLength];
+            foreach (TunnelContext context in _contexts)
+            {
+                SecureSocket.ApplyXor(context.Key, encryptedHandshake, candidate.Slice(0, encryptedHandshake.Length));
+
+                if (!candidate.Slice(0, NetworkHelper.MagicBytes.Length).SequenceEqual(NetworkHelper.MagicBytes))
+                {
+                    continue;
+                }
+
+                var type = (NetworkHelper.ConnectionType)candidate[4];
+                if (expectedType.HasValue && type != expectedType.Value)
+                {
+                    continue;
+                }
+
+                if (type == NetworkHelper.ConnectionType.Control)
+                {
+                    return new HandshakeMatch(context, type, Guid.Empty, ControlHandshakeLength);
+                }
+
+                if (type == NetworkHelper.ConnectionType.Data && encryptedHandshake.Length >= DataHandshakeLength)
+                {
+                    return new HandshakeMatch(context, type, new Guid(candidate.Slice(5, 16)), DataHandshakeLength);
+                }
+            }
+
+            return null;
+        }
+
+        private bool TryGetConnectionType(ReadOnlySpan<byte> encryptedControlHandshake, out NetworkHelper.ConnectionType type)
+        {
+            Span<byte> candidate = stackalloc byte[ControlHandshakeLength];
+            foreach (TunnelContext context in _contexts)
+            {
+                SecureSocket.ApplyXor(context.Key, encryptedControlHandshake, candidate);
+
+                if (candidate.Slice(0, NetworkHelper.MagicBytes.Length).SequenceEqual(NetworkHelper.MagicBytes))
+                {
+                    type = (NetworkHelper.ConnectionType)candidate[4];
+                    return true;
+                }
+            }
+
+            type = default;
+            return false;
+        }
+
+        private static async Task<bool> ReadRawExactAsync(Socket socket, Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            int totalRead = 0;
+            while (totalRead < buffer.Length)
+            {
+                int read = await socket.ReceiveAsync(buffer.Slice(totalRead), SocketFlags.None, cancellationToken);
+                if (read == 0)
+                {
+                    return false;
+                }
+
+                totalRead += read;
+            }
+
+            return true;
         }
     }
 }
