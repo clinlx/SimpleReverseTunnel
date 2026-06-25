@@ -25,14 +25,14 @@ dotnet build -c Release
 # protocol 可选: tcp 或 udp
 
 # 示例 1: 启动 TCP 代理 (默认)
-dotnet run -- server 9000 9001 MySecret
+dotnet run -- server 2560 8080 MySecret
 # 对于编译后的文件 ，改为执行：
-SimpleReverseTunnel.exe server 9000 9001 MySecret
+SimpleReverseTunnel.exe server 2560 8080 MySecret
 
 # 示例 2: 启动 UDP 代理
-dotnet run -- server 9000 9001 MySecret udp
+dotnet run -- server 2560 8080 MySecret udp
 # 对于编译后的文件 ，改为执行：
-SimpleReverseTunnel.exe server 9000 9001 MySecret udp
+SimpleReverseTunnel.exe server 2560 8080 MySecret udp
 ```
 
 ### 2. 客户端 (内网机器)
@@ -44,19 +44,21 @@ SimpleReverseTunnel.exe server 9000 9001 MySecret udp
 # protocol 可选: tcp 或 udp，必须与服务端保持一致
 
 # 示例 1: 转发本地 TCP 服务 (默认)
-dotnet run -- client 1.2.3.4 9000 127.0.0.1 80 MySecret
+dotnet run -- client 1.2.3.4 2560 127.0.0.1 80 MySecret
 # 对于编译后的文件 ，改为执行：
-SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 80 MySecret
+SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 80 MySecret
 
 # 示例 2: 转发本地 UDP 服务
-dotnet run -- client 1.2.3.4 9000 127.0.0.1 53 MySecret udp
+dotnet run -- client 1.2.3.4 2560 127.0.0.1 53 MySecret udp
 # 对于编译后的文件 ，改为执行：
-SimpleReverseTunnel.exe client 1.2.3.4 9000 127.0.0.1 53 MySecret udp
+SimpleReverseTunnel.exe client 1.2.3.4 2560 127.0.0.1 53 MySecret udp
 ```
 
 ### 3. 访问
 
-访问公网机器的 Public Port (如9001)，流量将被转发到内网机器的 Target Port (如80) 上。
+用户访问公网机器的 Public Port (如8080)，流量将被转发到内网机器的 Target Port (如80) 上。
+
+而服务本身的端口 (如2560) 仅用于客户端和服务端之间连接通信，不用于外部访问。
 
 ## Docker 部署
 
@@ -71,8 +73,8 @@ docker run -d \
   --network host \
   --restart unless-stopped \
   --name tunnel-server \
-  -e BRIDGE_PORT=9000 \
-  -e PUBLIC_PORT=9001 \
+  -e BRIDGE_PORT=2560 \
+  -e PUBLIC_PORT=8080 \
   -e PASSWORD=MySecret \
   swr.cn-south-1.myhuaweicloud.com/tunnel/simple-reverse-tunnel-server:latest
 ```
@@ -85,7 +87,7 @@ docker run -d \
   --restart unless-stopped \
   --name tunnel-client \
   -e SERVER_IP=1.2.3.4 \
-  -e SERVER_PORT=9000 \
+  -e SERVER_PORT=2560 \
   -e TARGET_IP=127.0.0.1 \
   -e TARGET_PORT=80 \
   -e PASSWORD=MySecret \
